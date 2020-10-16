@@ -4,11 +4,23 @@ import com.alibaba.otter.canal.client.CanalConnector;
 import com.alibaba.otter.canal.client.CanalConnectors;
 import com.alibaba.otter.canal.protocol.CanalEntry;
 import com.alibaba.otter.canal.protocol.Message;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.heimdall.canal.model.CanalBean;
+import com.heimdall.canal.model.Column;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * @author crh
@@ -85,32 +97,104 @@ public class CanalClient implements InitializingBean {
                     eventType));
             //判断是否是DDL语句
 
-            System.out.println("================》;isDdl: " + rowChage.getIsDdl() + ", sql:" + rowChage.getSql());
+            if (rowChage.getIsDdl()) {
+                System.out.println("================》;isDdl: true, sql:" + rowChage.getSql());
+            }
+
 
             //获取RowChange对象里的每一行数据，打印出来
             for (CanalEntry.RowData rowData : rowChage.getRowDatasList()) {
-                //如果是删除语句
-                if (eventType == CanalEntry.EventType.DELETE) {
-                    printColumn(rowData.getBeforeColumnsList());
-                    //如果是新增语句
-                } else if (eventType == CanalEntry.EventType.INSERT) {
-                    printColumn(rowData.getAfterColumnsList());
-                    //如果是更新的语句
-                } else {
-                    //变更前的数据
-                    System.out.println("------->; before");
-                    printColumn(rowData.getBeforeColumnsList());
-                    //变更后的数据
-                    System.out.println("------->; after");
-                    printColumn(rowData.getAfterColumnsList());
-                }
+                CanalBean canalBean = new CanalBean();
+                canalBean.setDatabase(entry.getHeader().getSchemaName());
+                canalBean.setTable(entry.getHeader().getTableName());
+                canalBean.setType(rowChage.getEventType().name());
+                canalBean.setTimestamp(System.currentTimeMillis());
+                canalBean.setDdl(rowChage.getIsDdl());
+                canalBean.setSql(rowChage.getSql());
+                canalBean.setAfterColumns(assembleColumns(rowData.getAfterColumnsList()));
+                canalBean.setBeforeColumns(assembleColumns(rowData.getBeforeColumnsList()));
+                canalBean.setData(assembleData(rowData.getAfterColumnsList()));
+                printColumn(canalBean);
+//                if (eventType == EventType.DELETE) {
+//                    printColumn(rowData.getBeforeColumnsList());
+//                } else if (eventType == EventType.INSERT) {
+//                    printColumn(rowData.getAfterColumnsList());
+//                } else {
+//                    System.out.println("-------&gt; before");
+//                    printColumn(rowData.getBeforeColumnsList());
+//                    System.out.println("-------&gt; after");
+//                    printColumn(rowData.getAfterColumnsList());
+//                }
             }
         }
     }
 
-    private static void printColumn(List<CanalEntry.Column> columns) {
-        for (CanalEntry.Column column : columns) {
-            System.out.println(column.getName() + " : " + column.getValue() + "    update=" + column.getUpdated());
+    private static void printColumn(CanalBean canalBean) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        try {
+            System.out.println(objectMapper.writeValueAsString(canalBean));
+        } catch (JsonProcessingException e) {
+            e.printStackTrace();
         }
     }
+
+    private static Map<String, Object> assembleData(List<CanalEntry.Column> columns) {
+        Map<String, Object> map = new LinkedHashMap<>(columns.size());
+        for (CanalEntry.Column column : columns) {
+            map.put(column.getName(), convertValue(column));
+        }
+        return map;
+    }
+
+    private static Object convertValue(CanalEntry.Column column) {
+        String mysqlType = column.getMysqlType();
+        int index = column.getMysqlType().indexOf('(');
+        if (index > -1) {
+            mysqlType = column.getMysqlType().substring(0, index);
+        }
+        switch (mysqlType) {
+
+            default:
+                throw new RuntimeException(String.format("unSupport mysql type with %s", column.getMysqlType()));
+        }
+        typeClass.put("tinyint", Integer::parseInt);
+        typeClass.put("smallint", Integer::parseInt);
+        typeClass.put("int", Integer::parseInt);
+        typeClass.put("bigint", Long::parseLong);
+        typeClass.put("char", v -> v);
+        typeClass.put("varchar", v -> v);
+        typeClass.put("tinytext", v -> v);
+        typeClass.put("text", v -> v);
+        typeClass.put("mediumtext", v -> v);
+        typeClass.put("longtext", v -> v);
+        typeClass.put("decimal", BigDecimal::new);
+        typeClass.put("date", v -> v);
+        typeClass.put("time", v -> v);
+        typeClass.put("datetime", v -> v);
+        typeClass.put("timestamp", Long::parseLong);
+        typeClass.put("json", v -> v);
+        typeClass.put("float", BigDecimal::new);
+        typeClass.put("double", BigDecimal::new);
+        if (value instanceof BigDecimal) {
+            String[] split = column.getMysqlType().split(",");
+            if (split.length == 2) {
+                String scale = split[1].substring(0, split.length - 1);
+                value = ((BigDecimal) value).setScale(Integer.parseInt(scale));
+            }
+        }
+    }
+
+    private static List<Column> assembleColumns(List<CanalEntry.Column> columns) {
+        return columns.stream()
+                .map(e -> {
+                    Column column = new Column();
+                    column.setName(e.getName());
+                    column.setValue(e.getValue());
+                    column.setUpdated(e.getUpdated());
+                    return column;
+                })
+                .collect(Collectors.toList());
+    }
+
+
 }
